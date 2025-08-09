@@ -11,8 +11,7 @@ import plotly.graph_objects as go
 st.set_page_config(
     page_title="Options Analytics Dashboard",
     layout="wide",
-    initial_sidebar_state="expanded",
-    page_icon="📈"
+    initial_sidebar_state="expanded"
 )
 
 # --- Pricing Functions ---
@@ -788,7 +787,7 @@ with tab3:
 
 # --- Option Pricing Dynamics Tab ---
 with tab4:
-    st.markdown("## 📊 Option Pricing Dynamics - 3D Surface")
+    st.markdown("## Option Pricing Dynamics - 3D Surface")
     st.write(f"**Strike Price (K):** ${selected_strike:.2f}")
     st.write(f"**Volatility (σ):** {sigma:.2%}")
     st.write(f"**Risk-Free Rate (r):** {r:.2%}")
