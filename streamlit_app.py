@@ -205,7 +205,7 @@ def render_trade_evaluation(eval_results, education_text, breakeven_label="Break
 # --- Streamlit App Layout ---
 st.markdown("""
 # **Options Analytics Dashboard**
-Welcome to your pro trading terminal. Analyze options, Greeks, and market comparisons — all in one place.
+Use this app as a trading assistant to analyze options, Greeks, and market comparisons — all in one place.
 """)
 
 st.sidebar.header("Inputs")
