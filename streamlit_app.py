@@ -4,10 +4,8 @@ import numpy as np
 import math
 from scipy.stats import norm
 from datetime import datetime, date
-import matplotlib.pyplot as plt
 import plotly.graph_objects as go
 
-# Set page configuration - only call once at the very top
 st.set_page_config(
     page_title="Options Analytics Dashboard",
     layout="wide",
@@ -19,6 +17,9 @@ def black_scholes_call(S, K, T, r, sigma):
     # Ensure T is not zero or negative for log and sqrt operations
     if T <= 0:
         return max(S - K, 0) # Intrinsic value at expiry
+    if sigma <= 0:
+        # With zero volatility the payoff is deterministic: discounted intrinsic value
+        return max(S - K * math.exp(-r * T), 0)
     d1 = (math.log(S/K) + (r + 0.5 * sigma**2)*T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
     return S * norm.cdf(d1) - K * math.exp(-r*T) * norm.cdf(d2)
@@ -27,6 +28,9 @@ def black_scholes_put(S, K, T, r, sigma):
     # Ensure T is not zero or negative for log and sqrt operations
     if T <= 0:
         return max(K - S, 0) # Intrinsic value at expiry
+    if sigma <= 0:
+        # With zero volatility the payoff is deterministic: discounted intrinsic value
+        return max(K * math.exp(-r * T) - S, 0)
     d1 = (math.log(S/K) + (r + 0.5 * sigma**2)*T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
     return K * math.exp(-r*T) * norm.cdf(-d2) - S * norm.cdf(-d1)
@@ -50,7 +54,6 @@ def calculate_greeks(S, K, T, r, sigma):
     delta_put = norm.cdf(d1) - 1 # Corrected: or norm.cdf(-d1)
     gamma = norm.pdf(d1) / (S * sigma * math.sqrt(T))
     
-    # Theta is typically annualized. Divide by 365 for daily Theta if needed for display.
     theta_call = (-S * norm.pdf(d1) * sigma / (2 * math.sqrt(T)) - r * K * math.exp(-r * T) * norm.cdf(d2))
     theta_put = (-S * norm.pdf(d1) * sigma / (2 * math.sqrt(T)) + r * K * math.exp(-r * T) * norm.cdf(-d2))
     
@@ -81,6 +84,29 @@ def get_options_chain(ticker, expiry):
     except Exception as e:
         st.error(f"Error fetching options chain for {ticker} on {expiry}: {e}. Please check the ticker and expiry date.")
         return None, None
+        
+@st.cache_data(ttl=60) # Cache the ticker lookup itself (expirations list, current price, volatility)
+def get_ticker_data(ticker):
+    """Fetches expirations, current price, and realized volatility for a ticker in one cached call."""
+    stock = yf.Ticker(ticker)
+    expirations = stock.options
+ 
+    try:
+        data = stock.history(period="1d")
+        S = float(data['Close'].iloc[-1]) if not data.empty else 100.0
+    except Exception:
+        S = 100.0
+ 
+    try:
+        hist_data = stock.history(period="60d")
+        returns = hist_data['Close'].pct_change().dropna()
+        sigma = float(returns.std() * np.sqrt(252)) if len(returns) > 1 else 0.25
+        if not sigma or sigma <= 0:
+            sigma = 0.25
+    except Exception:
+        sigma = 0.25
+ 
+    return expirations, S, sigma
 
 def plot_greeks(S, K, T, r, sigma):
     st.markdown("### Greek Sensitivities across Stock Prices")
@@ -169,7 +195,6 @@ def render_trade_evaluation(eval_results, education_text, breakeven_label="Break
         st.write(f"**{breakeven_label}s:**") # Bold label on one line
         st.text(breakeven_str) # Formatted prices on the next line
     else:
-        # --- NEW AGGRESSIVE HTML LINE (for single breakeven) ---
         st.write(f"**{breakeven_label}:**") # Bold label on one line
         st.text(f"${eval_results['Breakeven']:.2f}") # Formatted price on the next line
 
@@ -209,11 +234,7 @@ Use this app as a trading assistant to analyze options, Greeks, and market compa
 """)
 
 st.sidebar.header("Inputs")
-ticker = st.sidebar.text_input("Enter Stock Ticker", 'AAPL', help="Enter the stock ticker you want to analyze, like 'AAPL' for Apple.").upper()
-
-# --- Fetch and Initialize Data ---
-options_data = yf.Ticker(ticker)
-expirations = options_data.options
+ticker = st.sidebar.text_input("Enter Stock Ticker", 'AAPL', help="Enter the stock ticker you want to analyze, like 'AAPL' for Apple.").strip().upper()
 
 # Initialize variables to avoid NameError
 S = None
@@ -227,11 +248,26 @@ market_call_price = 0.0
 market_put_price = 0.0
 selected_strike = None # Initialize selected_strike
 
+if not ticker:
+    st.sidebar.warning("Please enter a stock ticker to continue.")
+    st.stop()
+    
+# --- Fetch and Initialize Data (cached, and guarded against invalid/delisted tickers) ---
+try:
+    expirations, S, sigma = get_ticker_data(ticker)
+except Exception as e:
+    st.sidebar.error(f"Could not fetch data for ticker **{ticker}**: {e}. Please check the ticker symbol.")
+    st.stop()
+
 if not expirations:
     st.sidebar.warning(f"No options expirations found for ticker: **{ticker}**. Please try another ticker or check Yahoo Finance.")
     st.stop() # Stop execution if no expirations are found
 
 expiry = st.sidebar.selectbox("Select Expiration Date", expirations, help="Select an expiration date for the option chain you want to analyze.")
+
+# --- Fetch and Initialize Data ---
+options_data = yf.Ticker(ticker)
+expirations = options_data.options
 
 # Fetch historical data for current price and volatility
 try:
@@ -378,14 +414,12 @@ with tab3:
             # Max Loss = (Initial Stock Price - Premium Received) * 100 (if stock goes to zero)
             max_loss = (initial_stock_price - call_premium) * 100
 
-            # Probability of Profit (POP): Probability that stock price at expiry > breakeven
-            # Or, P(Stock > (Initial_Stock_Price - Premium_Received))
-            # d2 for call expiring worthless (stock price < strike)
-            # A more common interpretation for covered call POP is P(stock price at expiry < strike price)
-            # This means the call expires worthless, and you keep the premium and stock.
-            # d1 and d2 here are calculated for the call option at strike K
-            d1_pop = (np.log(initial_stock_price / call_strike) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-            pop = norm.cdf(-d1_pop) # Probability the call expires out-of-the-money (worthless)
+            # Probability of Profit (POP): P(stock price at expiry < strike price),
+            # i.e. the call expires worthless and you keep the premium and stock.
+            # Uses the risk-neutral d2 formula (drift term r - 0.5*sigma^2), which is the
+            # standard way to express P(S_T < X) under the risk-neutral measure.
+            d2_pop = (np.log(initial_stock_price / call_strike) + (r - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+            pop = norm.cdf(-d2_pop) # Probability the call expires out-of-the-money (worthless)
 
             # Expected Value is complex for capped profit/loss. A rough approximation:
             # P(Profit) * Avg_Profit_Scenario - P(Loss) * Avg_Loss_Scenario
@@ -457,7 +491,6 @@ with tab3:
         pnl = protective_put_pnl(stock_prices_for_pnl, stock_price_at_entry, put_strike_strat, put_premium_strat, contracts)
 
         def protective_put_evaluator(initial_stock_price, put_strike, T, r, sigma, put_premium):
-            # Breakeven = Initial Stock Price + Premium paid
             breakeven = initial_stock_price + put_premium
 
             # Max Loss = (Initial Stock Price - Put Strike + Premium Paid) * 100, if stock falls below put strike
@@ -565,14 +598,7 @@ with tab3:
             d2_upper_be = (np.log(S_current / upper_breakeven) + (r - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
             
             # POP = P(stock price < lower breakeven) + P(stock price > upper breakeven)
-            pop = norm.cdf(-d2_lower_be) + (1 - norm.cdf(-d2_upper_be)) # Check this for accuracy based on standard POP definition
-
-            # The probability of profit for a straddle is the probability that the price ends *outside* the breakeven points.
-            # P(S_T < Lower Breakeven) + P(S_T > Upper Breakeven)
-            d1_lower_be_pop = (np.log(S_current / lower_breakeven) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-            d1_upper_be_pop = (np.log(S_current / upper_breakeven) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-            
-            pop_actual = norm.cdf(-d1_lower_be_pop) + (1 - norm.cdf(d1_upper_be_pop)) # Probability of being below lower BE or above upper BE
+            pop_actual = norm.cdf(-d2_lower_be) + norm.cdf(d2_upper_be)
             pop_actual = max(0, min(1, pop_actual)) # Ensure POP is between 0 and 1
 
             # Expected Value is hard due to unlimited profit. It's usually negative due to time decay.
@@ -652,10 +678,9 @@ with tab3:
             max_profit = "Unlimited"
 
             # Probability of Profit (POP) = P(Stock Price at Expiry > Breakeven Price)
-            # Use d1 for probability of option being ITM for call, but for breakeven, it's P(S_T > Breakeven)
-            d1_breakeven = (np.log(S_current / breakeven) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-            pop_breakeven = 1 - norm.cdf(d1_breakeven) # P(S_T > Breakeven) for a call is norm.cdf(d2_breakeven)
-            pop_breakeven = norm.cdf((np.log(S_current/breakeven) + (r + 0.5 * sigma**2)*T) / (sigma * np.sqrt(T)))
+            # using the risk-neutral d2 formula (drift term r - 0.5*sigma^2).
+            d2_breakeven = (np.log(S_current / breakeven) + (r - 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+            pop_breakeven = norm.cdf(d2_breakeven) # P(S_T > Breakeven)
             pop_breakeven = max(0, min(1, pop_breakeven)) # Ensure POP is between 0 and 1
 
             # Expected Value (Approx.) = (Probability of Profit * Avg Profit) - (Probability of Loss * Max Loss)
@@ -793,7 +818,10 @@ with tab4:
     st.write(f"**Risk-Free Rate (r):** {r:.2%}")
 
     stock_prices_3d = np.linspace(S * 0.5, S * 1.5, 50)
-    times_to_expiration_3d = np.linspace(0.01, T, 50) # Ensure time doesn't start at 0
+    # Ensure the time axis never starts at 0 (log/div-by-zero) and never runs backwards
+    # for very near-term expiries (T < 0.01)
+    t_axis_max = max(T, 0.02)
+    times_to_expiration_3d = np.linspace(0.01, t_axis_max, 50)
 
     if selected_strike < S * 0.5 or selected_strike > S * 1.5:
         st.warning(f"⚠️ The selected strike price (${selected_strike:.2f}) is quite far from the current stock price range shown (${S * 0.5:.2f} - ${S * 1.5:.2f}). The surface plot may be less informative or unstable.")
